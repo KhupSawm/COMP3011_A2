@@ -18,6 +18,11 @@ import javafx.scene.image.Image;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 
+import java.util.List;
+
+
+
+
 /**
  * The controller part of the video player model-view-controller architecture.
  * 
@@ -33,11 +38,12 @@ public class VideoPlayerController {
 
     public VideoPlayerController(
             boolean audioEnabled,
+            List<FrameProcessor> frameProcessors,
             BiConsumer<Integer, Integer> videoSizeChangedHandler) {
         this.view = new VideoPlayerView();
         this.videoSizeChangedHandler = videoSizeChangedHandler;
         model = new VideoPlayerModel(
-                audioEnabled,
+                audioEnabled, frameProcessors,
                 this::onVideoSizeChanged,
                 this::onFrameReady,
                 this::onStatusChanged,
