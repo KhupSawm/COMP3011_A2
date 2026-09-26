@@ -103,9 +103,9 @@ public class VideoPlayerModel {
         this.playbackStateChangedHandler = playbackStateChangedHandler;
         this.audioOutputStateChangedHandler = audioOutputStateChangedHandler;
         this.frameProcessors = new ArrayList<>();
-        frameProcessors.add(new FrameBleeder());
-        frameProcessors.add(new FrameScratcher());
-        frameProcessors.add(new FrameDuster());
+//        frameProcessors.add(new FrameBleeder());
+//        frameProcessors.add(new FrameScratcher());
+//        frameProcessors.add(new FrameDuster());
 //        frameProcessors.add(new FramePepperer());
 //        frameProcessors.add(new FrameBlackAndWhiter());
 //        frameProcessors.add(new FrameYellower());
