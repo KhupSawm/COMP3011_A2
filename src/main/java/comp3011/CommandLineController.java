@@ -32,6 +32,9 @@ public class CommandLineController {
     private Integer displayId;
     private File videoFile;
     private String errorMessage;
+    
+    //First frame effect
+    private boolean framebleeder;
 
     public CommandLineController(String[] args) {
         this.args = args.clone();
@@ -85,6 +88,12 @@ public class CommandLineController {
                 setDisplayId(1);
             } else if ("-2".equals(arg) || "--monitor-2".equals(arg)) {
                 setDisplayId(2);
+            
+            //Frame processor effect
+            } else if ("-n".equals(arg) || "--number-frames".equals(arg)) {
+                framebleeder = true;
+            } else if ("-s".equals(arg) || "--scratch-frames".equals(arg)) {
+                framebleeder = true;
             } else if (arg.startsWith("-")) {
                 errorMessage = "Unknown option: " + arg;
             } else {
@@ -124,5 +133,15 @@ public class CommandLineController {
         System.out.println("  -x, --maximise     Open the player maximised");
         System.out.println("  -1, --monitor-1    Open the player on display 1");
         System.out.println("  -2, --monitor-2    Open the player on display 2");
+        System.out.println();
+        System.out.println("Frame processors:");
+        System.out.println("  -n, --number-frames         Render the frame number onto each frame");
+        System.out.println("  -s, --scratch-frames        Render vertical film scratches");
+
     }
+
+	public boolean isFramebleeder() {
+		return framebleeder;
+	}
+
 }
