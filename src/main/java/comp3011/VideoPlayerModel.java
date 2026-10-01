@@ -81,7 +81,6 @@ public class VideoPlayerModel {
     private JavaFXFrameConverter converter; // Takes Frame objects to JavaFX Image objects, which can be put on screen.
     private AudioPlayer audioPlayer; // This is ours. It has some real time buffering smarts.
     private PreparedFrame preparedFrame; // Ours, but is just an Image with some meta-data added.
-    private boolean prepareNextFrameQueued; // True only when the event loop needs to call our prepareNextFrame method.
     private boolean playbackOpen; // True when playback is happening.
     private volatile boolean pauseRequested;
     private boolean audioOutputEnabled;
@@ -101,7 +100,8 @@ public class VideoPlayerModel {
     
     private Thread audioThread;
     private Thread decodeThread; // Owns the FFmpeg grabber exclusively; no other thread may touch it.
-
+    private Thread effectsThread; // Applies the FrameProcessor chain and converts frames for display.
+    
     public VideoPlayerModel(
             boolean audioEnabled,
             List<FrameProcessor> frameProcessors,
@@ -250,6 +250,8 @@ public class VideoPlayerModel {
             // Calling startDecordThread here removed prepareNextFrame() 
             // since the decode thread now starts producing frame on its own.
             startDecodeThread(); 
+            // Calling startEffectsThread starting the effects thread
+            startEffectsThread();
             notifyPlaybackStateChanged();
         } catch (Exception e) {
             handlePlaybackError(e);
@@ -462,6 +464,44 @@ public class VideoPlayerModel {
         decodeThread.setDaemon(true);
         decodeThread.start();
     }
+    
+    // Runs on its own thread. Takes raw decoded frames from decodedFrames,
+    // applies the full FrameProcessor chain in order, converts the result to
+    // a displayable JavaFX Image, and hands it to the FX thread via
+    // preparedFrames. Running this separately from decode lets both stages
+    // use a separate CPU core at once, which is the core performance gain
+    // this redesign is aiming for.
+    private void runEffectsLoop() {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                DecodedFrame decoded = decodedFrames.take();
+
+                InfoFrame info = new InfoFrame(decoded.frameNumber(), decoded.timestampUs());
+                processFrame(decoded.frame(), info);
+
+                Image image = converter.convert(decoded.frame());
+
+                preparedFrames.put(new PreparedFrame(
+                        image,
+                        decoded.frameNumber(),
+                        decoded.timestampUs(),
+                        decoded.logicalTimestampUs(),
+                        decoded.targetTimeNs(),
+                        System.nanoTime()));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            Platform.runLater(() -> handlePlaybackError(e));
+        }
+    }
+
+    // Starts the effects thread, mirroring the pattern used for decode and audio.
+    private void startEffectsThread() {
+        effectsThread = new Thread(this::runEffectsLoop, "effects-thread");
+        effectsThread.setDaemon(true);
+        effectsThread.start();
+    }
 
     // This is called on a heart beat by the GUI thread. We want to be co-operative here by (a) not blocking, and (b)
     // getting our required work out of the way quickly so that we can return control flow to the JavaFX event loop for
@@ -489,16 +529,10 @@ public class VideoPlayerModel {
         // to replace this whole block with simple linear control flow logic
         // such as: if (!pauseRequested && preparedFrame == null) prepareNextFrame();
         // to compare.
-        if (!pauseRequested && preparedFrame == null && !prepareNextFrameQueued) {
-            prepareNextFrameQueued = true;
-            Platform.runLater(() -> {
-                prepareNextFrameQueued = false;
-
-                if (!pauseRequested) {
-                    prepareNextFrame();
-                }
-            });
+        if (!pauseRequested && preparedFrame == null) {
+            preparedFrame = preparedFrames.poll();
         }
+        
     }
 
     private void displayPreparedFrame(long now) {
@@ -650,6 +684,12 @@ public class VideoPlayerModel {
         if (decodeThread != null) {
             decodeThread.interrupt();
             decodeThread = null;
+        }
+        
+        // Interrupt it on shutdown
+        if (effectsThread != null) {
+            effectsThread.interrupt();
+            effectsThread = null;
         }
 
         if (audioPlayer != null) {
