@@ -139,16 +139,16 @@ public class CommandLineController {
                 setDisplayId(1);
             } else if ("-2".equals(arg) || "--monitor-2".equals(arg)) {
                 setDisplayId(2);
-            //Long-form frame processor flag, e.g. "--scratch-frames". Look up
-            //which letter it corresponds to, then create one new processor instance for it via the factory map.
+            // Long-form frame processor flag, e.g. "--scratch-frames". Look up
+            // which letter it corresponds to, then create one new processor instance for it via the factory map.
             } else if (longForm.containsKey(arg)) {
                 frameProcessors.add(frameP.get(longForm.get(arg)).get());
 
-            //Short-form flag(s), e.g. "-n" or a cluster like "-nssnf". Every
-            //character after the dash must be a valid processor letter (checked up front so a bad cluster like "-nz" is rejected as a whole,
-            //rather than partially applying valid letters before failing).
-            //Processors are created and appended in the exact left-to-right
-            //order the letters appear, so repeats and ordering both work.
+            // Short-form flag(s), e.g. "-n" or a cluster like "-nssnf". Every
+            // character after the dash must be a valid processor letter (checked up front so a bad cluster like "-nz" is rejected as a whole,
+            // rather than partially applying valid letters before failing).
+            // Processors are created and appended in the exact left-to-right
+            // order the letters appear, so repeats and ordering both work.
             } else if (arg.length() > 1 && arg.charAt(0) == '-' && isAllFrameProcessorLetters(arg.substring(1))) {
                 for (char c : arg.substring(1).toCharArray()) {
                     frameProcessors.add(frameP.get(c).get());
@@ -196,7 +196,15 @@ public class CommandLineController {
         System.out.println("Frame processors:");
         System.out.println("  -n, --number-frames         Render the frame number onto each frame");
         System.out.println("  -s, --scratch-frames        Render vertical film scratches");
-
+        System.out.println("  -f, --flicker-frames   Randomly dim frames");
+        System.out.println("  -w, --black-and-white  Convert frames to black and white");
+        System.out.println("  -y, --yellow-frames    Apply a warmer colour temperature");
+        System.out.println("  -v, --vignette-frame   Darken the frame edges");
+        System.out.println("  -d, --dust-frame       Render dust and hair marks");
+        System.out.println("  -j, --jitter-frames    Randomly displace frames by a few pixels");
+        System.out.println("  -m, --mottle-frames    Add cloudy emulsion mottling");
+        System.out.println("  -b, --bleed-frames     Bleed light into frames");
+        System.out.println("  -p, --pepper-frames    Pepper frames with dark spots/blotches");
     }
 
 
