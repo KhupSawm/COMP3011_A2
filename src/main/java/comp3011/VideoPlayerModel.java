@@ -656,6 +656,7 @@ public class VideoPlayerModel {
             audioPlayer.close();
             audioPlayer = null;
         }
+        
 
         if (grabber != null) {
             try {
