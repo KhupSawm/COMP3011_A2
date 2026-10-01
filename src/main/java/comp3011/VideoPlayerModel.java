@@ -49,6 +49,12 @@ public class VideoPlayerModel {
 
     private final List<FrameProcessor> frameProcessors;
     private final BlockingQueue<PendingAudio> pendingAudio = new ArrayBlockingQueue<>(50);
+    // Holds raw decoded frames waiting to be effect-processed. Bounded so a fast
+    // decode thread can't race arbitrarily far ahead of a slower effects thread.
+    private final BlockingQueue<DecodedFrame> decodedFrames = new ArrayBlockingQueue<>(5);
+    // Holds fully effect-processed, display-ready frames waiting for the FX thread.
+    private final BlockingQueue<PreparedFrame> preparedFrames = new ArrayBlockingQueue<>(5);
+    
     private final BiConsumer<Integer, Integer> videoSizeChangedHandler;
     private final Consumer<Image> frameReadyHandler;
     private final Consumer<String> statusChangedHandler;
@@ -357,7 +363,7 @@ public class VideoPlayerModel {
             long relativeTimestampUs = Math.max(0, timestampUs - firstTimestampUs);
             long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
             long targetTimeNs = playbackStartNs + relativeTimestampUs * 1_000L;
-
+            
             return new PreparedFrame(
                     image,
                     frameNumber,
@@ -654,7 +660,17 @@ public class VideoPlayerModel {
     private void notifyAudioOutputStateChanged() {
         audioOutputStateChangedHandler.accept(audioOutputEnabled);
     }
-
+    
+    // Carries one raw decoded frame plus its timing metadata from the decode
+    // thread to the effects thread, before any FrameProcessor has run on it.
+    private record DecodedFrame(
+            Frame frame,
+            int frameNumber,
+            long timestampUs,
+            long logicalTimestampUs,
+            long targetTimeNs) {
+    }
+    
     private record PreparedFrame(
             Image image,
             int frameNumber,
