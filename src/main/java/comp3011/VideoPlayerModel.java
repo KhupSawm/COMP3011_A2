@@ -100,6 +100,7 @@ public class VideoPlayerModel {
     private long relativeSeekBaseUs = NO_SEEK_REQUEST;
     
     private Thread audioThread;
+    private Thread decodeThread; // Owns the FFmpeg grabber exclusively; no other thread may touch it.
 
     public VideoPlayerModel(
             boolean audioEnabled,
@@ -245,7 +246,10 @@ public class VideoPlayerModel {
             playbackOpen = true;
             playbackTimer.start();
             startAudioThread();
-            prepareNextFrame();
+//            prepareNextFrame();
+            // Calling startDecordThread here removed prepareNextFrame() 
+            // since the decode thread now starts producing frame on its own.
+            startDecodeThread(); 
             notifyPlaybackStateChanged();
         } catch (Exception e) {
             handlePlaybackError(e);
@@ -374,6 +378,89 @@ public class VideoPlayerModel {
         }
 
         return null;
+    }
+    
+    // AI: Copilot assisted here with expection thread.
+    // Runs on its own thread. Continuously grabs frames from the FFmpeg
+    // grabber, queues any audio samples, and hands each decoded video frame
+    // to the effects stage via decodedFrames. This thread is the sole owner
+    // of grabber - no other thread may call methods on it, which keeps
+    // FFmpeg's non-thread-safe grabber access free of race conditions.
+    private void runDecodeLoop() {
+        try {
+            while (!Thread.currentThread().isInterrupted() && playbackOpen) {
+                Frame frame = grabFrame();
+                if (frame == null) {
+                    Platform.runLater(this::finishPlayback);
+                    return;
+                }
+
+                long timestampUs = grabber.getTimestamp();
+                if (audioAvailable && frame.samples != null) {
+                    queueAudio(timestampUs, frame);
+                }
+
+                if (frame.image == null) {
+                    continue;
+                }
+
+                if (!frameProcessorsInitialised) {
+                    initialiseFrameProcessors(new InfoVideo(
+                            mediaName(videoFile),
+                            totalVideoFrames,
+                            frame.imageWidth,
+                            frame.imageHeight,
+                            frame.imageDepth,
+                            frame.imageChannels,
+                            frame.imageStride,
+                            frameRate,
+                            intFrameRate,
+                            videoFrameDurationUs,
+                            grabber.getPixelFormat()));
+                    frameProcessorsInitialised = true;
+                }
+
+                if (firstTimestampUs == NO_SEEK_REQUEST) {
+                    firstTimestampUs = timestampUs;
+                    playbackStartNs = System.nanoTime();
+                    if (pauseRequested) {
+                        pauseStartedNs = playbackStartNs;
+                    }
+                }
+
+                long relativeTimestampUs = Math.max(0, timestampUs - firstTimestampUs);
+                long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
+                long targetTimeNs = playbackStartNs + relativeTimestampUs * 1_000L;
+                
+                // AI assisted here provided the idea to use .clone().
+                // Critical region: grabber.grab() reuses the same underlying Frame
+                // object on every call, overwriting its buffers in place. Without
+                // cloning here, the next loop iteration would corrupt the pixel
+                // data out from under the effects thread mid-processing - a frame
+                // tearing race condition. clone() gives the effects thread its own
+                // independent copy, safe from being overwritten by future decodes.
+                Frame frameCopy = frame.clone();
+
+                decodedFrames.put(new DecodedFrame(
+                        frameCopy,
+                        grabber.getFrameNumber(),
+                        timestampUs,
+                        logicalTimestampUs,
+                        targetTimeNs));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            Platform.runLater(() -> handlePlaybackError(e));
+        }
+    }
+
+    // Starts the decode thread. Called once per playback session from
+    // startPlayback, mirroring the pattern already used for the audio thread.
+    private void startDecodeThread() {
+        decodeThread = new Thread(this::runDecodeLoop, "decode-thread");
+        decodeThread.setDaemon(true);
+        decodeThread.start();
     }
 
     // This is called on a heart beat by the GUI thread. We want to be co-operative here by (a) not blocking, and (b)
@@ -557,6 +644,12 @@ public class VideoPlayerModel {
         if (audioThread != null) {
             audioThread.interrupt();
             audioThread = null;
+        }
+        
+        // Interrupt the decode thread on shutdown.
+        if (decodeThread != null) {
+            decodeThread.interrupt();
+            decodeThread = null;
         }
 
         if (audioPlayer != null) {
