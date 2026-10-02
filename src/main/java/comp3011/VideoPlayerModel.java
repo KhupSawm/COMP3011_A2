@@ -30,6 +30,9 @@ import javafx.scene.image.Image;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
 /**
  * The model part of the video player model-view-controller architecture.
  *
@@ -93,14 +96,28 @@ public class VideoPlayerModel {
     private int intFrameRate;
     private int totalVideoFrames;
     private volatile long firstTimestampUs = NO_SEEK_REQUEST;
-    private long logicalPlaybackBaseUs;
+    private volatile long logicalPlaybackBaseUs;
     private volatile long playbackStartNs;
-    private long pauseStartedNs;
+    private volatile long pauseStartedNs;
     private long relativeSeekBaseUs = NO_SEEK_REQUEST;
     
     private Thread audioThread;
     private Thread decodeThread; // Owns the FFmpeg grabber exclusively; no other thread may touch it.
     private Thread effectsThread; // Applies the FrameProcessor chain and converts frames for display.
+    
+    // Epoch counter. Incremented immediately on every seek, so frames already
+    // decoded or mid-processing under the old epoch can be recognised as
+    // stale and dropped, rather than briefly appearing after the seek.
+    private final AtomicLong generation = new AtomicLong();
+    
+    // Thread-safe handoff of a seek target to the decode thread. Only the
+    // decode thread may call methods on grabber, so other threads request a
+    // seek via this reference instead of touching grabber directly.
+    private final AtomicReference<SeekRequest> pendingSeek = new AtomicReference<>();
+    
+    // Distinguishes a real shutdown interrupt (exit the decode loop) from an
+    // interrupt sent only to wake the thread for a pending seek (keep going).
+    private volatile boolean shuttingDown;
     
     public VideoPlayerModel(
             boolean audioEnabled,
@@ -218,15 +235,28 @@ public class VideoPlayerModel {
             return;
         }
 
-        try {
-            grabber.setTimestamp(grabTimestampUs);
-            resetPlaybackClock(logicalTimestampUs);
-            flushAudioOutput();
-            prepareNextFrame();
-            notifyPlaybackStateChanged();
-        } catch (Exception e) {
-            handlePlaybackError(e);
+        // Bump the epoch immediately, making every frame already queued or midd processing unusable.
+        generation.incrementAndGet();
+        
+        // Best-effort cleanup only, not relied on for correctness by itself
+        // a frame a consumer thread already took off a queue won't be
+        // removed by clear() and that's what the generation checks are for.
+        decodedFrames.clear();
+        preparedFrames.clear();
+        preparedFrame = null;
+        currentTimestampUs = logicalTimestampUs;
+        relativeSeekBaseUs = logicalTimestampUs;
+
+        pendingSeek.set(new SeekRequest(grabTimestampUs, logicalTimestampUs));
+
+        // Wake the decode thread immediately if it's blocked waiting for
+        // queue space, so it notices the seek without delay.
+        if (decodeThread != null) {
+            decodeThread.interrupt();
         }
+
+        flushAudioOutput();
+        notifyPlaybackStateChanged();
     }
 
     private void startPlayback(long startTimestampUs, boolean initiallyPaused, long initialRelativeSeekBaseUs) {
@@ -308,79 +338,6 @@ public class VideoPlayerModel {
         pauseStartedNs = 0;
     }
 
-    private void prepareNextFrame() {
-        if (!playbackOpen || preparedFrame != null) {
-            return;
-        }
-
-        try {
-            preparedFrame = readNextVideoFrame();
-        } catch (Exception e) {
-            handlePlaybackError(e);
-        }
-    }
-
-    private PreparedFrame readNextVideoFrame() throws Exception {
-        while (playbackOpen) {
-            Frame frame = grabFrame();
-            if (frame == null) {
-                finishPlayback();
-                return null;
-            }
-
-            long timestampUs = grabber.getTimestamp();
-            if (audioAvailable && frame.samples != null) {
-                queueAudio(timestampUs, frame);
-            }
-
-            if (frame.image == null) {
-                continue;
-            }
-
-            if (!frameProcessorsInitialised) {
-                initialiseFrameProcessors(new InfoVideo(
-                        mediaName(videoFile),
-                        totalVideoFrames,
-                        frame.imageWidth,
-                        frame.imageHeight,
-                        frame.imageDepth,
-                        frame.imageChannels,
-                        frame.imageStride,
-                        frameRate,
-                        intFrameRate,
-                        videoFrameDurationUs,
-                        grabber.getPixelFormat()));
-                frameProcessorsInitialised = true;
-            }
-
-            if (firstTimestampUs == NO_SEEK_REQUEST) {
-                firstTimestampUs = timestampUs;
-                playbackStartNs = System.nanoTime();
-                if (pauseRequested) {
-                    pauseStartedNs = playbackStartNs;
-                }
-            }
-
-            int frameNumber = grabber.getFrameNumber();
-            InfoFrame info = new InfoFrame(frameNumber, timestampUs);
-            processFrame(frame, info);
-
-            Image image = converter.convert(frame);
-            long relativeTimestampUs = Math.max(0, timestampUs - firstTimestampUs);
-            long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
-            long targetTimeNs = playbackStartNs + relativeTimestampUs * 1_000L;
-            
-            return new PreparedFrame(
-                    image,
-                    frameNumber,
-                    timestampUs,
-                    logicalTimestampUs,
-                    targetTimeNs,
-                    System.nanoTime());
-        }
-
-        return null;
-    }
     
     // AI: Copilot assisted here with expection thread.
     // Runs on its own thread. Continuously grabs frames from the FFmpeg
@@ -389,9 +346,28 @@ public class VideoPlayerModel {
     // of grabber - no other thread may call methods on it, which keeps
     // FFmpeg's non-thread-safe grabber access free of race conditions.
     private void runDecodeLoop() {
-        try {
-            while (!Thread.currentThread().isInterrupted() && playbackOpen) {
-                Frame frame = grabFrame();
+        long localGeneration = generation.get();
+            while (playbackOpen) {
+                SeekRequest seek = pendingSeek.getAndSet(null);
+                if (seek != null) {
+                    try {
+                        performSeek(seek);
+                    } catch (Exception e) {
+                        Platform.runLater(() -> handlePlaybackError(e));
+                        return;
+                    }
+                    localGeneration = generation.get();
+                }
+                
+            	Frame frame;
+                
+                try {
+                    frame = grabFrame();
+                } catch (Exception e) {
+                    Platform.runLater(() -> handlePlaybackError(e));
+                    return;
+                }
+               
                 if (frame == null) {
                     Platform.runLater(this::finishPlayback);
                     return;
@@ -407,18 +383,16 @@ public class VideoPlayerModel {
                 }
 
                 if (!frameProcessorsInitialised) {
-                    initialiseFrameProcessors(new InfoVideo(
-                            mediaName(videoFile),
-                            totalVideoFrames,
-                            frame.imageWidth,
-                            frame.imageHeight,
-                            frame.imageDepth,
-                            frame.imageChannels,
-                            frame.imageStride,
-                            frameRate,
-                            intFrameRate,
-                            videoFrameDurationUs,
-                            grabber.getPixelFormat()));
+                    try {
+                        initialiseFrameProcessors(new InfoVideo(
+                                mediaName(videoFile), totalVideoFrames,
+                                frame.imageWidth, frame.imageHeight, frame.imageDepth,
+                                frame.imageChannels, frame.imageStride, frameRate,
+                                intFrameRate, videoFrameDurationUs, grabber.getPixelFormat()));
+                    } catch (Exception e) {
+                        Platform.runLater(() -> handlePlaybackError(e));
+                        return;
+                    }
                     frameProcessorsInitialised = true;
                 }
 
@@ -443,18 +417,36 @@ public class VideoPlayerModel {
                 // independent copy, safe from being overwritten by future decodes.
                 Frame frameCopy = frame.clone();
 
-                decodedFrames.put(new DecodedFrame(
+                DecodedFrame decoded = new DecodedFrame(
                         frameCopy,
                         grabber.getFrameNumber(),
                         timestampUs,
                         logicalTimestampUs,
-                        targetTimeNs));
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            Platform.runLater(() -> handlePlaybackError(e));
+                        targetTimeNs, localGeneration);
+            
+                try {
+                    decodedFrames.put(decoded);
+                } catch (InterruptedException e) {
+                    if (shuttingDown) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    // Woken for a seek, not a shutdown: this frame is now stale
+                    // anyway (a newer epoch is coming), so just loop back around -
+                    // the top-of-loop check will pick up pendingSeek next pass.
+                }
         }
+    }
+    
+    // Runs only on the decode thread, the sole owner of grabber. Jumps the
+    // decoder to the requested timestamp and resets the clock fields the
+    // decode loop uses to time subsequently decoded frames.
+    private void performSeek(SeekRequest seek) throws Exception {
+        grabber.setTimestamp(seek.grabTimestampUs());
+        firstTimestampUs = NO_SEEK_REQUEST;
+        playbackStartNs = 0;
+        logicalPlaybackBaseUs = seek.logicalTimestampUs();
+        pauseStartedNs = pauseRequested ? System.nanoTime() : 0;
     }
 
     // Starts the decode thread. Called once per playback session from
@@ -472,28 +464,59 @@ public class VideoPlayerModel {
     // use a separate CPU core at once, which is the core performance gain
     // this redesign is aiming for.
     private void runEffectsLoop() {
-        try {
-            while (!Thread.currentThread().isInterrupted()) {
-                DecodedFrame decoded = decodedFrames.take();
+        
+        while (!Thread.currentThread().isInterrupted()) {
+            DecodedFrame decoded;
 
-                InfoFrame info = new InfoFrame(decoded.frameNumber(), decoded.timestampUs());
-                processFrame(decoded.frame(), info);
-
-                Image image = converter.convert(decoded.frame());
-
-                preparedFrames.put(new PreparedFrame(
-                        image,
-                        decoded.frameNumber(),
-                        decoded.timestampUs(),
-                        decoded.logicalTimestampUs(),
-                        decoded.targetTimeNs(),
-                        System.nanoTime()));
+            try {
+                decoded = decodedFrames.take();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            Platform.runLater(() -> handlePlaybackError(e));
+
+            // Drop frames decoded under an older epoch - a seek happened
+            // after this frame was produced but before it was consumed here.
+            if (decoded.generation() != generation.get()) {
+                continue;
+            }
+            
+            InfoFrame info = new InfoFrame(decoded.frameNumber(), decoded.timestampUs());
+            
+            try {
+                processFrame(decoded.frame(), info);
+            } catch (Exception e) {
+                Platform.runLater(() -> handlePlaybackError(e));
+                return;
+            }
+            
+            // Adding a guard to limit the race check the interrupted flag before touching converter
+            // so that a thread that's already been told to stop doesn't attempt another step.
+            if (Thread.currentThread().isInterrupted()) {
+            	return;
+            }
+            Image image = converter.convert(decoded.frame());
+
+            // Re-check after processing: old-generation work is allowed to
+            // finish, but its result must never be forwarded for display.
+            if (decoded.generation() != generation.get()) {
+                continue;
+            }
+            
+            try {
+            preparedFrames.put(new PreparedFrame(
+                    image,
+                    decoded.frameNumber(),
+                    decoded.timestampUs(),
+                    decoded.logicalTimestampUs(),
+                    decoded.targetTimeNs(),
+                    System.nanoTime(), decoded.generation()));
+            } catch (InterruptedException e) {
+            	Thread.currentThread().interrupt();
+            	return;
+            }
         }
+
     }
 
     // Starts the effects thread, mirroring the pattern used for decode and audio.
@@ -530,7 +553,11 @@ public class VideoPlayerModel {
         // such as: if (!pauseRequested && preparedFrame == null) prepareNextFrame();
         // to compare.
         if (!pauseRequested && preparedFrame == null) {
-            preparedFrame = preparedFrames.poll();
+            PreparedFrame candidate = preparedFrames.poll();
+            // Discard if a seek happened after this frame was prepared but before the FX thread picked it up.
+            if (candidate != null && candidate.generation() == generation.get()) {
+                preparedFrame = candidate;
+            }
         }
         
     }
@@ -569,37 +596,6 @@ public class VideoPlayerModel {
             boolean queued = pendingAudio.offer(new PendingAudio(timestampUs, samples)); //Offer returns false if there is no space
         }
     }
-
-//    private void writeDueAudio(long now) {
-//        // Handle some obvious early exits
-//        if (!audioOutputEnabled || audioPlayer == null) {
-//            pendingAudio.clear();
-//            return;
-//        }
-//        if (pauseRequested || firstTimestampUs == NO_SEEK_REQUEST || playbackStartNs <= 0) {
-//            return;
-//        }
-//
-//        // Here is the real time dependent logic
-//        long dueTimestampUs = firstTimestampUs + (now + AUDIO_LEAD_NS - playbackStartNs) / 1_000L;
-//        while (!pendingAudio.isEmpty()) {
-//            PendingAudio audio = pendingAudio.peek();
-//            if (audio.timestampUs() > dueTimestampUs) {
-//                return;
-//            }
-//
-//            int written = audioPlayer.write(audio.samples(), audio.offset(), audio.remaining());
-//            if (written <= 0) {
-//                return;
-//            }
-//
-//            audio.advance(written);
-//            if (!audio.finished()) {
-//                return;
-//            }
-//            pendingAudio.remove();
-//        }
-//    }
     
     private void runAudioLoop() {
         try {
@@ -663,8 +659,26 @@ public class VideoPlayerModel {
         notifyStatusChanged("Error: " + e.getMessage());
         notifyPlaybackStateChanged();
     }
+    
+    // Waits briefly for a worker thread to actually finish after being
+    // interrupted. Needed because interrupt() alone doesn't guarantee a
+    // thread has stopped using shared resources (grabber, converter) without
+    // this, closing those resources could race against a thread still
+    // actively using them.
+    private void joinQuietly(Thread thread) {
+    	// Making joinQuietly itself null safe.
+    	if (thread == null) {
+    		return;
+    	}
+        try {
+            thread.join(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 
     private void closePlaybackResources() {
+    	shuttingDown = true;
         playbackTimer.stop();
         playbackOpen = false;
         preparedFrame = null;
@@ -677,18 +691,21 @@ public class VideoPlayerModel {
         
         if (audioThread != null) {
             audioThread.interrupt();
+            joinQuietly(audioThread);
             audioThread = null;
         }
         
         // Interrupt the decode thread on shutdown.
         if (decodeThread != null) {
             decodeThread.interrupt();
+            joinQuietly(audioThread);
             decodeThread = null;
         }
         
         // Interrupt it on shutdown
         if (effectsThread != null) {
             effectsThread.interrupt();
+            joinQuietly(audioThread);
             effectsThread = null;
         }
 
@@ -716,6 +733,9 @@ public class VideoPlayerModel {
             converter.close();
             converter = null;
         }
+        
+        pendingSeek.set(null);
+        shuttingDown = false;
     }
 
     private String mediaName(File file) {
@@ -802,7 +822,8 @@ public class VideoPlayerModel {
             int frameNumber,
             long timestampUs,
             long logicalTimestampUs,
-            long targetTimeNs) {
+            long targetTimeNs,
+            long generation) {
     }
     
     private record PreparedFrame(
@@ -811,9 +832,15 @@ public class VideoPlayerModel {
             long mediaTimestampUs,
             long logicalTimestampUs,
             long targetTimeNs,
-            long preparedAtNs) {
+            long preparedAtNs,
+            long generation) {
     }
 
+    // Carries a seek target from seekTo (FX thread) to the decode thread.
+    private record SeekRequest(long grabTimestampUs, long logicalTimestampUs) {
+    	
+    }
+    
     private static class PendingAudio {
         private final long timestampUs;
         private final byte[] samples;
