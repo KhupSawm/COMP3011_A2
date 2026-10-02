@@ -585,7 +585,7 @@ public class VideoPlayerModel {
         byte[] samples = audioPlayer.copySamples(frame);
         if (samples.length > 0) {
         	//On blockingQueue throws an exception if the queue is full
-            boolean queued = pendingAudio.offer(new PendingAudio(timestampUs, samples)); //Offer returns false if there is no space
+            pendingAudio.offer(new PendingAudio(timestampUs, samples)); //Offer returns false if there is no space
         }
     }
     
