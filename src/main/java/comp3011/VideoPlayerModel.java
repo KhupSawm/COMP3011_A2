@@ -495,6 +495,7 @@ public class VideoPlayerModel {
             if (Thread.currentThread().isInterrupted()) {
             	return;
             }
+            
             Image image = converter.convert(decoded.frame());
 
             // Re-check after processing: old-generation work is allowed to
