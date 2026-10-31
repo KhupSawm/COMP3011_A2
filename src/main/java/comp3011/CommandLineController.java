@@ -96,7 +96,10 @@ public class CommandLineController {
 	     Map.entry('j', FrameJitterer::new),
 	     Map.entry('m', FrameMottler::new),
 	     Map.entry('b', FrameBleeder::new),
-	     Map.entry('p', FramePepperer::new)
+	     Map.entry('p', FramePepperer::new),
+	     // Assignment 3 new function subtitle frame
+	     Map.entry('S', FrameSub::new)
+
 	 );
 	
 	 // Maps each long-form flag (e.g. "--number-frames") to the short letter it
@@ -115,7 +118,8 @@ public class CommandLineController {
 	     Map.entry("--jitter-frames", 'j'),
 	     Map.entry("--mottle-frames", 'm'),
 	     Map.entry("--bleed-frames", 'b'),
-	     Map.entry("--pepper-frames", 'p')
+	     Map.entry("--pepper-frames", 'p'),
+	     Map.entry("--subtitle-frames", 'S') // Subtitle
 	 );
 	 
 	//Returns true only if every character in s is a known frame-processor letter, and s isn't empty.
@@ -207,6 +211,7 @@ public class CommandLineController {
         System.out.println("  -m, --mottle-frames    Add cloudy emulsion mottling");
         System.out.println("  -b, --bleed-frames     Bleed light into frames");
         System.out.println("  -p, --pepper-frames    Pepper frames with dark spots/blotches");
+        System.out.println("  -S, --subtitle-frames  Add speech-to-text subtitles to frames");
         System.out.println();
         System.out.println("Frame processors are applied in command-line order and may be repeated.");
         System.out.println("Example: -nssnfwyvdjmbp numbers, scratches twice, numbers again, flickers,");
