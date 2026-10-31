@@ -35,13 +35,16 @@ public class VideoPlayerController {
     private final VideoPlayerModel model;
     private final VideoPlayerView view;
     private final BiConsumer<Integer, Integer> videoSizeChangedHandler;
+    private final List<FrameSub> subtitlers; // A3 subtitle
 
+    
     public VideoPlayerController(
             boolean audioEnabled,
             List<FrameProcessor> frameProcessors,
             BiConsumer<Integer, Integer> videoSizeChangedHandler) {
         this.view = new VideoPlayerView();
         this.videoSizeChangedHandler = videoSizeChangedHandler;
+        
         model = new VideoPlayerModel(
                 audioEnabled, frameProcessors,
                 this::onVideoSizeChanged,
@@ -49,6 +52,7 @@ public class VideoPlayerController {
                 this::onStatusChanged,
                 this::onPlaybackStateChanged,
                 this::onAudioOutputStateChanged);
+        
 
         view.getStartOverButton().setOnAction(_ -> startOver());
         view.getBackFiveButton().setOnAction(_ -> backFiveSeconds());
@@ -57,6 +61,15 @@ public class VideoPlayerController {
         view.getStopButton().setOnAction(_ -> stopAndExit());
         view.getAudioButton().setOnAction(_ -> toggleAudioOutput());
         view.showAudioEnabled(model.isAudioOutputEnabled());
+        
+        // Subtitle processors requested on the command line; empty means the button stays disabled.
+        subtitlers = frameProcessors.stream()
+                .filter(FrameSub.class::isInstance)
+                .map(FrameSub.class::cast)
+                .toList();
+        view.setSubtitleButtonDisabled(subtitlers.isEmpty());
+        view.showSubtitlesEnabled(!subtitlers.isEmpty());
+        view.getSubtitleButton().setOnAction(_ -> toggleSubtitles());
     }
 
     public void installKeyboardShortcuts(Scene scene) {
@@ -78,6 +91,9 @@ public class VideoPlayerController {
                 event.consume();
             } else if (event.getCode() == KeyCode.A) {
                 toggleAudioOutput();
+                event.consume();
+            } else if (event.getCode() == KeyCode.S) { // Subtitle key
+                toggleSubtitles();
                 event.consume();
             }
         });
@@ -115,6 +131,17 @@ public class VideoPlayerController {
     private void toggleAudioOutput() {
         model.toggleAudioOutput();
     }
+    
+    // A3 flips every subtitle processor on or off together and updates the button icon to match.
+    private void toggleSubtitles() {
+        if (subtitlers.isEmpty()) {
+            return;
+        }
+        boolean enable = !subtitlers.get(0).isEnabled();
+        subtitlers.forEach(subtitler -> subtitler.setEnabled(enable));
+        view.showSubtitlesEnabled(enable);
+    }
+    
 
     private void stopAndExit() {
         model.stopPlayback();

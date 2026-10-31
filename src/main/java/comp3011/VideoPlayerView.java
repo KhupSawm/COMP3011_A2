@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. KhupSawm, a1924824 modication for A3 subtitle
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -31,6 +31,7 @@ import javafx.scene.shape.Polygon;
 import javafx.scene.shape.SVGPath;
 import javafx.scene.shape.StrokeLineCap;
 
+import javafx.scene.shape.Rectangle;
 /**
  * The view part of the video player model-view-controller architecture.
  *
@@ -57,6 +58,9 @@ public class VideoPlayerView {
     private final Button forwardFiveButton;
     private final Button stopButton;
     private final Button audioButton;
+    
+    // A3 modification
+    private final Button subtitleButton; // Button for subtitle
 
     public VideoPlayerView() {
         imageView.setPreserveRatio(true);
@@ -75,6 +79,9 @@ public class VideoPlayerView {
         forwardFiveButton = iconButton(createLoopIcon(true, "5"));
         stopButton = iconButton(createStopIcon());
         audioButton = iconButton(createAudioIcon(false));
+        
+        // A3: subtitle button constructor
+        subtitleButton = iconButton(createSubtitleIcon(false));
         setPlaybackControlsDisabled(true);
 
         HBox controls = new HBox(
@@ -85,6 +92,7 @@ public class VideoPlayerView {
                 forwardFiveButton,
                 stopButton,
                 audioButton,
+                subtitleButton,
                 statusLabel);
 
         controls.setPadding(new Insets(10));
@@ -126,7 +134,24 @@ public class VideoPlayerView {
     public Button getAudioButton() {
         return audioButton;
     }
+    
+    // A3 getter for subtitle button
+    public Button getSubtitleButton() {
+    	return subtitleButton;
+    }
+    
+    // A3 setter
+    // Swaps the subtitle icon to show whether subtitles are currently on or off.
+    public void showSubtitlesEnabled(boolean enabled) {
+        subtitleButton.setGraphic(createSubtitleIcon(enabled));
+    }
 
+    // A3 subtitle clickable and unclickable
+    // Greys the subtitle button out when no subtitle processor was requested.
+    public void setSubtitleButtonDisabled(boolean disabled) {
+        subtitleButton.setDisable(disabled);
+    }
+    
     public void setStatus(String status) {
         statusLabel.setText(status);
     }
@@ -169,6 +194,7 @@ public class VideoPlayerView {
         setButtonTooltip(forwardFiveButton, "[RIGHT]");
         setButtonTooltip(stopButton, "[ESC]");
         setButtonTooltip(audioButton, "[A]");
+        setButtonTooltip(subtitleButton, "[S]"); // A3 Subtitle hotkey
     }
 
     private void setButtonTooltip(Button button, String text) {
@@ -337,7 +363,42 @@ public class VideoPlayerView {
 
         return pane;
     }
-
+    
+    // A3 Subtitle button the idea is caption-box icon with two text lines; a diagonal slash is added when subtitles are off
+    // Half of the code is similar to other button icons
+    private Node createSubtitleIcon(boolean enabled) {
+        Pane pane = new Pane();
+        pane.setMinSize(ICON_SIZE, ICON_SIZE);
+        pane.setPrefSize(ICON_SIZE, ICON_SIZE);
+        pane.setMaxSize(ICON_SIZE, ICON_SIZE);
+        
+        Rectangle box = new Rectangle(4, 7, 20, 14);
+        
+        box.setArcWidth(4);
+        box.setArcHeight(4);
+        box.setFill(null);
+        box.setStroke(Color.BLACK);
+        box.setStrokeWidth(2);
+        
+        Line topText = new Line(8, 12, 20, 12);
+        Line bottomText = new Line(8, 16, 16, 16);
+        
+        for (Line line : new Line[] { topText, bottomText }) {
+            line.setStroke(Color.BLACK);
+            line.setStrokeWidth(2);
+        }
+        
+        pane.getChildren().addAll(box, topText, bottomText);
+        if (!enabled) {
+            Line slash = new Line(5, 24, 23, 4);
+            slash.setStroke(Color.BLACK);
+            slash.setStrokeWidth(2.25);
+            pane.getChildren().add(slash);
+        }
+        return pane;
+    }
+    
+    
     // Little helper for different radius waves coming out of the speaker.
     private SVGPath audioWave(String content) {
         SVGPath wave = new SVGPath();
