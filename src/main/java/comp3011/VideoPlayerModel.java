@@ -140,8 +140,30 @@ public class VideoPlayerModel {
 
     public void play(File file) {
         videoFile = file;
+        
+        // Create a real subtitle source only when subtitles were requested.
+        // Reuse one source if multiple FrameSub processors exist.
+        SubtitleSource subtitleSource = null;
+        
+        for (FrameProcessor processor : frameProcessors) {
+
+            // Check whether this processor handles subtitles.
+            if (processor instanceof FrameSub subtitleProcessor) {
+
+                // Create the server source only once.
+                if (subtitleSource == null) {
+                    subtitleSource = new ServerSubtitleSource(file);
+                }
+
+                // Connect the real subtitle source to the processor.
+                subtitleProcessor.setSubtitleSource(subtitleSource);
+            }
+        }
+        
         videoDurationUs = NO_SEEK_REQUEST;
         videoFrameDurationUs = 0;
+        
+        // Start normal video playback without waiting for transcription.
         startPlayback(0, false, NO_SEEK_REQUEST);
     }
 
